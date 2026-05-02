@@ -164,4 +164,4 @@ The [Pixel Detector](https://github.com/ozel/DIY_particle_detector/wiki/Pixel-De
 
 ---
 ## Useage
-**Read requirements and install. Please Use with Venv**
+**Read requirements.txt file and install. Please install with Venv**
