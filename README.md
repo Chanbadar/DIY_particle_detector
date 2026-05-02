@@ -163,5 +163,5 @@ After a little introduction into the soldering of electronic components, the who
 The [Pixel Detector](https://github.com/ozel/DIY_particle_detector/wiki/Pixel-Detectors) and [Diode Characterisation](https://github.com/ozel/DIY_particle_detector/wiki/Diode-Characterisation) sections have been moved to the [wiki](https://github.com/ozel/DIY_particle_detector/wiki) of this project. Both are related to the [scientific article](https://www.mdpi.com/1424-8220/19/19/4264/htm) and represent supplementary material.
 
 ---
-
-Please Use with Venv
+## Useage
+**Read requirements and install. Please Use with Venv**
