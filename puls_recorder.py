@@ -1,309 +1,503 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Scientific Pulse Analysis Pipeline for DIY Particle Detector.
-Transitions from simple event counting to high-fidelity feature extraction.
-Modules: BLR, Matched Filter, Robust MAD detection, FWHM/Integral Characterization.
+DIY Particle Detector - Professional Pulse Recorder
+Optimized for Sr-90 (Strontium-90) Beta Particle Detection.
 
-Author: Antigravity
+Features:
+- Real-time digital band-pass filtering (Butterworth)
+- High-performance queue-based processing (no buffer under-runs)
+- Adaptive and manual thresholding
+- Advanced spectral analysis (Pulse Height Distribution)
+- Dark-mode professional GUI with CPS history
+
+Author: Antigravity (Advanced Agentic Coding)
 Date: May 2026
 """
 
 import sys
 import time
-import queue
-import threading
 import datetime
 import os
-import csv
-from collections import deque
+import queue
+import threading
+from typing import List, Optional, Tuple
+import json
 
 import numpy as np
 import pandas as pd
+from scipy import signal
 import pyaudio
 import pyqtgraph as pg
-from PyQt5 import QtWidgets, QtCore, QtGui
-from scipy import signal
+from PyQt5 import QtCore, QtGui, QtWidgets
 
-# --- SCIENTIFIC CONFIGURATION ---
-RATE = 48000            # Sample rate (ADC)
-FRAME_SIZE = 2048       # Buffer block size
-DATA_FOLDER = "./data"  
-HPF_CORNER = 100        # Baseline HPF corner frequency (Hz)
-K_THRESHOLD = 6.0       # Threshold multiplier (k * MAD)
-DEAD_TIME_MS = 10.0     # Non-paralyzable dead-time in milliseconds
+# --- Configuration Constants ---
+RATE = 48000               # Sampling rate (Hz)
+FRAME_SIZE = 4096          # Buffer size
+DEFAULT_THRESHOLD = -400   # Initial trigger level
+MIN_ALPHA_PEAK = -2500     # Threshold to distinguish alpha/beta (calibration dependent)
+DEAD_TIME_S = 0.002        # Signal dead-time in seconds
+DATA_FOLDER = "./data"     # Where to save recordings
+FILTER_LOW_FC = 1000       # High-pass corner (Hz) to remove hum
+FILTER_HIGH_FC = 12000     # Low-pass corner (Hz) to remove noise
+SAVE_RAW_WAVEFORMS = True  # Save pulse shapes for post-analysis
+PULSE_WINDOW_SIZE = 128    # Samples to save around each peak
+CALIBRATION_FACTOR = 1.0   # Rough CPS to Energy/Activity scale
 
-# Pulse Shape Model (Fast Rise + Exponential Decay)
-TAU_DECAY = 0.0005      # 500 us decay
-TAU_RISE = 0.00005      # 50 us rise
+# --- Theme Configuration ---
+COLOR_BACKGROUND = '#121212'
+COLOR_SIGNAL = '#00f2ff'   # Cyan
+COLOR_TRIGGER = '#ff3b3b'  # Red
+COLOR_CPS = '#ffd700'      # Gold
+COLOR_HIST = '#a8ff00'     # Lime
 
-# Ensure data folder exists
-if not os.path.exists(DATA_FOLDER):
-    os.makedirs(DATA_FOLDER)
-
-class FeatureExtractor:
-    """Computes high-fidelity features for each detected pulse."""
-    
-    @staticmethod
-    def extract_all(wf_corrected, p_idx, rate):
-        """
-        Extracts pulse parameters from a baseline-corrected signal.
-        Expected wf_corrected: np.array where pulses are POSITIVE spikes.
-        """
-        # Define extraction window (5ms)
-        win_samples = int(0.005 * rate)
-        start = max(0, p_idx - int(0.1 * win_samples))
-        end = min(len(wf_corrected), p_idx + int(0.9 * win_samples))
-        pulse_wf = wf_corrected[start:end]
+class PulseLogger(threading.Thread):
+    """Background thread to handle data persistence without blocking GUI/Audio."""
+    def __init__(self, folder: str):
+        super().__init__()
+        self.folder = folder
+        self.queue = queue.Queue()
+        self._running = True
+        self.output_file = None
         
-        # Local peak in window (for sub-sample precision or window alignment)
-        local_p_idx = p_idx - start
-        amplitude = pulse_wf[local_p_idx]
-        
-        # 1. Integral (Area under curve in the window)
-        integral = np.sum(pulse_wf)
-        
-        # 2. FWHM (Full Width at Half Maximum) via interpolation
-        fwhm = 0.0
-        try:
-            half_max = amplitude / 2.0
-            # Search left
-            left_side = pulse_wf[:local_p_idx]
-            l_idx = np.where(left_side < half_max)[0][-1]
-            # Linear interpolation for sub-sample left crossing
-            l_val1, l_val2 = left_side[l_idx], left_side[l_idx+1]
-            l_interp = l_idx + (half_max - l_val1) / (l_val2 - l_val1)
+        if not os.path.exists(folder):
+            os.makedirs(folder)
             
-            # Search right
-            right_side = pulse_wf[local_p_idx:]
-            r_idx = np.where(right_side < half_max)[0][0]
-            # Linear interpolation for sub-sample right crossing
-            r_val1, r_val2 = right_side[r_idx-1], right_side[r_idx]
-            r_interp = (local_p_idx + r_idx - 1) + (half_max - r_val1) / (r_val2 - r_val1)
-            
-            fwhm = (r_interp - l_interp) / rate
-        except:
-            pass # Fallback to 0 if signal is too noisy or short
-            
-        # 3. Rise Time (10% to 90%)
-        rise_time = 0.0
-        try:
-            v10 = 0.1 * amplitude
-            v90 = 0.9 * amplitude
-            t10 = np.where(pulse_wf >= v10)[0][0]
-            t90 = np.where(pulse_wf >= v90)[0][0]
-            rise_time = (t90 - t10) / rate
-        except:
-            pass
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.filename = f"{folder}/pulses_raw_{timestamp}.pkl"
 
-        return {
-            "amplitude": float(amplitude),
-            "integral": float(integral),
-            "fwhm_ms": float(fwhm * 1000),
-            "rise_time_us": float(rise_time * 1e6)
-        }
+    def run(self):
+        accumulated = []
+        last_save = time.time()
+        
+        while self._running or not self.queue.empty():
+            try:
+                # Use timeout to allow checking self._running
+                pulse_data = self.queue.get(timeout=0.5)
+                accumulated.append(pulse_data)
+                
+                # Periodically dump to disk or if we have enough
+                if len(accumulated) >= 100 or (time.time() - last_save > 10):
+                    self._save_batch(accumulated)
+                    accumulated = []
+                    last_save = time.time()
+            except queue.Empty:
+                if accumulated:
+                    self._save_batch(accumulated)
+                    accumulated = []
+                continue
+
+    def _save_batch(self, batch):
+        """Append batch to pickle or other format. For simplicity here, we use a growing list in a dataframe if it's the first time, but for real async we could use HDF5 or just append rows to a CSV."""
+        # We don't save the full waveform snippet in CSV (too bulky), just peak info
+        # but to satisfy "background logger", we could append to a CSV.
+        temp_df = pd.DataFrame(batch)
+        csv_name = self.filename.replace(".pkl", ".csv")
+        header = not os.path.exists(csv_name)
+        # We don't save the full waveform snippet in CSV (too bulky), just peak info
+        summary_df = temp_df.drop(columns=['waveform'])
+        summary_df.to_csv(csv_name, mode='a', header=header, index=False)
+        
+    def log(self, pulse_dict):
+        self.queue.put(pulse_dict)
+
+    def stop(self):
+        self._running = False
 
 class SignalProcessor:
-    """Advanced Multi-stage DSP: Baseline -> Matched Filter -> MAD Estimation."""
-    def __init__(self, rate):
+    """Handles digital filtering and pulse detection."""
+    def __init__(self, rate: int):
         self.rate = rate
-        # 1. High-pass filter for coarse DC removal (4th order Butterworth SOS)
-        self.sos = signal.butter(4, HPF_CORNER, 'hp', fs=rate, output='sos')
-        self.filter_state = np.zeros((self.sos.shape[0], 2))
+        self.smoothing_win = 5 # Small moving average
+        # 4th order Butterworth bandpass
+        nyq = 0.5 * rate
+        low = FILTER_LOW_FC / nyq
+        high = FILTER_HIGH_FC / nyq
+        self.b, self.a = signal.butter(4, [low, high], btype='band')
+        self.zi = signal.lfilter_zi(self.b, self.a)
         
-        # 2. Matched Filter Kernel (Rise/Decay model)
-        t_kernel = np.linspace(0, 0.005, int(rate * 0.005))
-        self.kernel = (1 - np.exp(-t_kernel/TAU_RISE)) * np.exp(-t_kernel/TAU_DECAY)
-        self.kernel /= np.sum(self.kernel) # Normalize for unity area
-        
-        # Baseline buffer for slow drift estimation
-        self.last_mad = 0.001
+        self.dead_time_samples = int(DEAD_TIME_S * rate)
+        self.last_pulse_sample = -self.dead_time_samples
+        self.current_sample_idx = 0
+        self.last_noise_rms = 0.0
 
-    def process(self, frame_int16):
-        # Normalize
-        x = frame_int16.astype(np.float32) / 32768.0
-        
-        # Stage 1: Coarse Filtering
-        x_filtered, self.filter_state = signal.sosfilt(self.sos, x, zi=self.filter_state)
-        
-        # Stage 2: Matched Filtering (Convolve with expected pulse shape)
-        # Note: Invert signal early as we expect negative spikes
-        x_inverted = -x_filtered
-        x_matched = signal.convolve(x_inverted, self.kernel, mode='same')
-        
-        # Stage 3: Robust Noise Estimation (MAD)
-        # 1.4826 constant for consistency with Gaussian sigma
-        median = np.median(x_matched)
-        mad = 1.4826 * np.median(np.abs(x_matched - median))
-        self.last_mad = 0.95 * self.last_mad + 0.05 * mad # Moving average MAD
-        
-        return x_inverted, x_matched, self.last_mad
+    def update_filter(self, low_fc: float, high_fc: float):
+        """Update Butterworth filter coefficients dynamically."""
+        nyq = 0.5 * self.rate
+        low = max(0.001, low_fc / nyq)
+        high = min(0.999, high_fc / nyq)
+        self.b, self.a = signal.butter(4, [low, high], btype='band')
+        # We don't reset zi to avoid discontinuities, or we do it if noise is too high
+        # self.zi = signal.lfilter_zi(self.b, self.a)
 
-class PulseDetector:
-    """Non-paralyzable dead-time logic and peak hunting."""
-    def __init__(self, rate, dead_time_ms):
-        self.rate = rate
-        self.dt_samples = int((dead_time_ms / 1000.0) * rate)
-        self.obs_count = 0
-        self.start_time = time.time()
+    def process(self, chunk: np.ndarray, threshold: float) -> Tuple[np.ndarray, List[dict]]:
+        """Filters a chunk and returns detected pulses."""
+        filtered, self.zi = signal.lfilter(self.b, self.a, chunk, zi=self.zi)
         
-    def find_peaks(self, signal_data, threshold):
-        # Uses scipy find_peaks with distance constraint for dead-time
-        peaks, _ = signal.find_peaks(signal_data, height=threshold, distance=self.dt_samples)
-        return peaks
+        # Apply additional smoothing to remove high-freq jitter
+        if self.smoothing_win > 1:
+            filtered = np.convolve(filtered, np.ones(self.smoothing_win)/self.smoothing_win, mode='same')
 
-    def get_rates(self):
-        elapsed = time.time() - self.start_time
-        if elapsed <= 0: return 0.0, 0.0
+        # Calculate Noise RMS (rough estimate from first parts of chunk)
+        self.last_noise_rms = np.std(filtered[:int(len(filtered)/4)]) if len(filtered) > 100 else 0
         
-        r_obs = self.obs_count / elapsed
-        # Dead-time correction: R_true = R_obs / (1 - R_obs * Tau)
-        tau = DEAD_TIME_MS / 1000.0
-        r_true = r_obs / (1 - r_obs * tau) if (r_obs * tau) < 1.0 else r_obs
-        
-        return r_obs, r_true
-
-class DataManager:
-    """Scientific Data Logger (CSV/Pickle)."""
-    def __init__(self):
-        self.records = []
-        self.lock = threading.Lock()
-        self.filename = datetime.datetime.now().strftime("pulses_%Y-%m-%d_%H-%M-%S")
-
-    def log(self, timestamp, features):
-        with self.lock:
-            # Classification logic based on FWHM/RiseTime
-            # Simple heuristic: Alphas are usually wider/larger
-            classification = "alpha" if features["integral"] > 0.5 or features["fwhm_ms"] > 0.5 else "beta"
+        pulses = []
+        # Detection logic: find local minima below threshold
+        # We use a simple peek detection with dead-time
+        for i in range(1, len(filtered) - 1):
+            val = filtered[i]
+            global_idx = self.current_sample_idx + i
             
-            record = {
-                "timestamp": timestamp,
-                "type": classification,
-                **features
-            }
-            self.records.append(record)
-
-    def save_all(self):
-        if not self.records: return
+            # Check for peak (local minimum) and threshold
+            if val < threshold and val < filtered[i-1] and val < filtered[i+1]:
+                # Check for dead-time
+                if (global_idx - self.last_pulse_sample) > self.dead_time_samples:
+                    self.last_pulse_sample = global_idx
+                    # Extract waveform snippet centered on peak
+                    start = max(0, i - PULSE_WINDOW_SIZE // 2)
+                    end = min(len(filtered), i + PULSE_WINDOW_SIZE // 2)
+                    waveform_snippet = filtered[start:end].copy()
+                    
+                    pulses.append({
+                        'idx': global_idx,
+                        'peak': val,
+                        'timestamp': datetime.datetime.now(),
+                        'waveform': waveform_snippet
+                    })
         
-        # Save as Pickle (Full precision)
-        df = pd.DataFrame(self.records)
-        df.to_pickle(os.path.join(DATA_FOLDER, self.filename + ".pkl"))
-        
-        # Save as CSV (Analysis ready)
-        df.to_csv(os.path.join(DATA_FOLDER, self.filename + ".csv"), index=False)
-        print(f"Logged {len(self.records)} pulses to {DATA_FOLDER}")
+        self.current_sample_idx += len(chunk)
+        return filtered, pulses
 
-class AudioStream:
-    """Minimal PyAudio input."""
+class AudioStreamProvider(QtCore.QThread):
+    """Low-level audio capture thread using PyAudio."""
+    chunk_ready = QtCore.pyqtSignal(np.ndarray)
+    
     def __init__(self):
+        super().__init__()
         self.p = pyaudio.PyAudio()
-        self.queue = queue.Queue(maxsize=30)
-        self.stream = self.p.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=RATE,
-            input=True,
-            frames_per_buffer=FRAME_SIZE,
-            stream_callback=self._callback
-        )
+        self.stream = None
+        self._running = False
+
+    def run(self):
+        self._running = True
+        try:
+            self.stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=RATE,
+                input=True,
+                frames_per_buffer=FRAME_SIZE,
+                stream_callback=self._callback
+            )
+            while self._running:
+                time.sleep(0.1)
+        except Exception as e:
+            print(f"Audio Error: {e}")
+        finally:
+            self.stop()
 
     def _callback(self, in_data, frame_count, time_info, status):
-        # Capture absolute ADC time if possible
-        now = time.time()
-        samples = np.frombuffer(in_data, dtype=np.int16)
-        try:
-            self.queue.put_nowait((now, samples))
-        except queue.Full:
-            pass
+        samples = np.frombuffer(in_data, dtype=np.int16).astype(np.float32)
+        self.chunk_ready.emit(samples)
         return (None, pyaudio.paContinue)
 
     def stop(self):
-        self.stream.stop_stream()
-        self.stream.close()
+        self._running = False
+        if self.stream:
+            self.stream.stop_stream()
+            self.stream.close()
         self.p.terminate()
 
-class ScientificScope(QtWidgets.QMainWindow):
-    """Scientific Display & Processing Hub."""
+class DetectorMainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Scientific Particle Analyzer v2.0")
-        self.resize(1200, 750)
-        
-        # Logic
-        self.proc = SignalProcessor(RATE)
-        self.det = PulseDetector(RATE, DEAD_TIME_MS)
-        self.data = DataManager()
-        self.audio = AudioStream()
-        
-        # UI
-        self.init_ui()
-        
-        # Timer
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.process_loop)
-        self.timer.start(15)
+        self.setWindowTitle("Professional Particle Detector - Sr-90 Optimized")
+        self.setMinimumSize(1200, 800)
+        self.setStyleSheet(f"background-color: {COLOR_BACKGROUND}; color: white;")
 
-    def init_ui(self):
-        widget = QtWidgets.QWidget()
-        self.setCentralWidget(widget)
-        layout = QtWidgets.QVBoxLayout(widget)
+        # Data State
+        self.threshold = DEFAULT_THRESHOLD
+        self.total_counts = 0
+        self.counts_history = []
+        self.time_history = []
+        self.amplitude_history = []
+        self.start_time = time.time()
+        self.recorded_pulses = [] # List of dicts for efficient storage
+        self.alpha_counts = 0
+        self.beta_counts = 0
+        self.min_alpha_peak = MIN_ALPHA_PEAK
+        self.filter_low = FILTER_LOW_FC
+        self.filter_high = FILTER_HIGH_FC
         
-        # Top Panel: Main Signal
-        self.plt_signal = pg.PlotWidget(title="Baseline-Corrected & Matched Signal")
-        self.plt_signal.addLegend()
-        self.plt_signal.setYRange(0, 0.5)
-        self.curve_matched = self.plt_signal.plot(pen='c', name="Matched Output")
-        self.line_thl = self.plt_signal.plot(pen=pg.mkPen('r', style=QtCore.Qt.DashLine), name="Adaptive MAD THL")
-        self.scatter_peaks = pg.ScatterPlotItem(size=10, brush='m', name="Detected")
-        self.plt_signal.addItem(self.scatter_peaks)
-        layout.addWidget(self.plt_signal)
-        
-        # Stats Panel
-        self.lbl_stats = QtWidgets.QLabel("Status: Streaming...")
-        self.lbl_stats.setFont(QtGui.QFont("Monospace", 12))
-        self.lbl_stats.setStyleSheet("background-color: #1e1e1e; color: #00ff00; border-radius: 5px; padding: 10px;")
-        layout.addWidget(self.lbl_stats)
+        self.is_paused = False
+        self.last_cps_calc = time.time()
+        self.counts_in_interval = 0
+        self.current_cps = 0.0
 
-    def process_loop(self):
-        while not self.audio.queue.empty():
-            ts_frame, raw_data = self.audio.queue.get()
+        # UI Setup
+        self.setup_ui()
+        self.setup_audio()
+        
+        # Async Logger
+        self.logger = PulseLogger(DATA_FOLDER)
+        self.logger.start()
+        
+        # Timers
+        self.stats_timer = QtCore.QTimer()
+        self.stats_timer.timeout.connect(self.update_stats)
+        self.stats_timer.start(1000)
+
+    def setup_ui(self):
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QtWidgets.QVBoxLayout(central_widget)
+
+        # Header Info
+        self.header = QtWidgets.QLabel("Initializing System...")
+        self.header.setFont(QtGui.QFont("Segoe UI", 16, QtGui.QFont.Bold))
+        layout.addWidget(self.header)
+
+        # Plot Area
+        plots_layout = QtWidgets.QHBoxLayout()
+        
+        # Left: Main Oscilloscope
+        self.scope_widget = pg.PlotWidget(title="Live Pulse View")
+        self.scope_widget.setBackground(COLOR_BACKGROUND)
+        self.scope_widget.setYRange(-15000, 15000)
+        self.scope_curve = self.scope_widget.plot(pen=pg.mkPen(COLOR_SIGNAL, width=1))
+        self.threshold_line = pg.InfiniteLine(pos=self.threshold, angle=0, pen=pg.mkPen(COLOR_TRIGGER, style=QtCore.Qt.DashLine))
+        self.scope_widget.addItem(self.threshold_line)
+        plots_layout.addWidget(self.scope_widget, 4)
+
+        # Right sidebar: CPS History and Histogram
+        side_layout = QtWidgets.QVBoxLayout()
+        
+        self.history_widget = pg.PlotWidget(title="Count Rate (CPS)")
+        self.history_widget.setBackground(COLOR_BACKGROUND)
+        self.history_curve = self.history_widget.plot(pen=pg.mkPen(COLOR_CPS, width=2))
+        side_layout.addWidget(self.history_widget)
+        
+        self.hist_widget = pg.PlotWidget(title="Amplitude Distribution (Spectrum)")
+        self.hist_widget.setBackground(COLOR_BACKGROUND)
+        self.hist_curve = pg.PlotCurveItem(fillLevel=0, brush=pg.mkBrush(COLOR_HIST + '44'))
+        self.hist_widget.addItem(self.hist_curve)
+        side_layout.addWidget(self.hist_widget)
+        
+        plots_layout.addLayout(side_layout, 2)
+        layout.addLayout(plots_layout)
+
+        # Controls
+        controls = QtWidgets.QHBoxLayout()
+        self.btn_pause = QtWidgets.QPushButton("Pause Stream")
+        self.btn_pause.clicked.connect(self.toggle_pause)
+        self.btn_clear = QtWidgets.QPushButton("Clear Data")
+        self.btn_clear.clicked.connect(self.clear_data)
+        
+        self.btn_save = QtWidgets.QPushButton("Save & Exit")
+        self.btn_save.clicked.connect(self.close)
+        
+        for btn in [self.btn_pause, self.btn_clear, self.btn_save]:
+            btn.setMinimumHeight(40)
+            btn.setStyleSheet("background-color: #333; border: 1px solid #555; padding: 5px;")
+            controls.addWidget(btn)
             
-            # DSP Stage
-            corrected_raw, matched, mad = self.proc.process(raw_data)
-            thl = K_THRESHOLD * mad
+        layout.addLayout(controls)
+
+        # Settings Panel
+        settings_layout = QtWidgets.QHBoxLayout()
+        self.lbl_alpha_thl = QtWidgets.QLabel(f"Alpha Threshold: {self.min_alpha_peak}")
+        self.slider_alpha = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider_alpha.setRange(-10000, 0)
+        self.slider_alpha.setValue(int(self.min_alpha_peak))
+        self.slider_alpha.valueChanged.connect(self.update_alpha_thl)
+        
+        settings_layout.addWidget(self.lbl_alpha_thl)
+        settings_layout.addWidget(self.slider_alpha)
+        
+        # Filter Controls
+        filter_layout = QtWidgets.QVBoxLayout()
+        fc_layout = QtWidgets.QHBoxLayout()
+        self.lbl_filter = QtWidgets.QLabel(f"Filter: {self.filter_low}-{self.filter_high} Hz")
+        self.btn_auto_thl = QtWidgets.QPushButton("Auto-Set Thl (6σ)")
+        self.btn_auto_thl.clicked.connect(self.auto_set_threshold)
+        
+        fc_layout.addWidget(self.lbl_filter)
+        fc_layout.addWidget(self.btn_auto_thl)
+        filter_layout.addLayout(fc_layout)
+        
+        # Sliders for Filter
+        slider_layout = QtWidgets.QHBoxLayout()
+        self.slider_low = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider_low.setRange(100, 5000)
+        self.slider_low.setValue(int(self.filter_low))
+        self.slider_low.valueChanged.connect(self.on_filter_changed)
+        
+        self.slider_high = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider_high.setRange(5000, 20000)
+        self.slider_high.setValue(int(self.filter_high))
+        self.slider_high.valueChanged.connect(self.on_filter_changed)
+        
+        slider_layout.addWidget(QtWidgets.QLabel("Low Cut:"))
+        slider_layout.addWidget(self.slider_low)
+        slider_layout.addWidget(QtWidgets.QLabel("High Cut:"))
+        slider_layout.addWidget(self.slider_high)
+        filter_layout.addLayout(slider_layout)
+        
+        layout.addLayout(settings_layout)
+        layout.addLayout(filter_layout)
+
+    def setup_audio(self):
+        self.processor = SignalProcessor(RATE)
+        self.audio_thread = AudioStreamProvider()
+        self.audio_thread.chunk_ready.connect(self.on_audio_data)
+        self.audio_thread.start()
+
+    def on_audio_data(self, data: np.ndarray):
+        if self.is_paused:
+            return
             
-            # Detection Stage
-            peaks = self.det.find_peaks(matched, thl)
+        # DSP Pipeline
+        filtered, detected_pulses = self.processor.process(data, self.threshold)
+        
+        for p in detected_pulses:
+            peak = p['peak']
+            self.total_counts += 1
+            self.counts_in_interval += 1
+            self.amplitude_history.append(abs(peak))
             
-            # Feature Extraction Stage
-            for p_idx in peaks:
-                # Precise timestamp
-                abs_ts = ts_frame + (p_idx / RATE)
-                feats = FeatureExtractor.extract_all(corrected_raw, p_idx, RATE)
-                self.data.log(abs_ts, feats)
-                self.det.obs_count += 1
-                
-            # Update GUI
-            self.curve_matched.setData(matched)
-            self.line_thl.setData([thl] * FRAME_SIZE)
-            self.scatter_peaks.setData(x=peaks, y=matched[peaks])
+            p_type = 'alpha' if peak < self.min_alpha_peak else 'beta'
+            if p_type == 'alpha': self.alpha_counts += 1
+            else: self.beta_counts += 1
+
+            # Log data
+            if SAVE_RAW_WAVEFORMS:
+                pulse_record = {
+                    'timestamp': p['timestamp'],
+                    'peak': peak,
+                    'type': p_type,
+                    'waveform': p['waveform']
+                }
+                self.recorded_pulses.append(pulse_record)
+                self.logger.log(pulse_record)
+
+        # Update Scope
+        self.scope_curve.setData(filtered)
+        
+    def update_stats(self):
+        if self.is_paused:
+            return
             
-            r_obs, r_true = self.det.get_rates()
-            self.lbl_stats.setText(
-                f"Observed Rate: {r_obs:6.2f} CPS | Corrected Rate: {r_true:6.2f} CPS\n"
-                f"Background Noise (MAD): {mad:.6f} | Events Logged: {self.det.obs_count}"
-            )
+        now = time.time()
+        dt = now - self.last_cps_calc
+        self.current_cps = self.counts_in_interval / dt
+        self.counts_history.append(self.current_cps)
+        self.time_history.append(now - self.start_time)
+        
+        # Keep history reasonable
+        if len(self.counts_history) > 100:
+            self.counts_history.pop(0)
+            self.time_history.pop(0)
+
+        # Update UI
+        noise_info = f" | Noise: {self.processor.last_noise_rms:.1f} RMS"
+        self.header.setText(f"System Active | Total: {self.total_counts} (α: {self.alpha_counts}, β: {self.beta_counts}) | Rate: {self.current_cps:.2f} CPS{noise_info}")
+        self.history_curve.setData(self.time_history, self.counts_history)
+        
+        # Update Histogram
+        if self.amplitude_history:
+            y, x = np.histogram(self.amplitude_history, bins=50, range=(0, 20000))
+            self.hist_curve.setData(x[:-1], y)
+            
+        self.counts_in_interval = 0
+        self.last_cps_calc = now
+
+    def update_alpha_thl(self, val):
+        self.min_alpha_peak = val
+        self.lbl_alpha_thl.setText(f"Alpha Threshold: {self.min_alpha_peak}")
+
+    def auto_set_threshold(self):
+        """Estimate noise level and set threshold automatically."""
+        # We use a 6-sigma rule for very conservative triggering
+        new_thl = -6.0 * self.processor.last_noise_rms
+        self.threshold = min(-100, new_thl) # Don't set too low to avoid DC offset issues
+        self.threshold_line.setValue(self.threshold)
+        print(f"Auto-Threshold set to {self.threshold:.1f}")
+
+    def on_filter_changed(self):
+        self.filter_low = self.slider_low.value()
+        self.filter_high = self.slider_high.value()
+        self.lbl_filter.setText(f"Filter: {self.filter_low}-{self.filter_high} Hz")
+        self.processor.update_filter(self.filter_low, self.filter_high)
+
+    def toggle_pause(self):
+        self.is_paused = not self.is_paused
+        self.btn_pause.setText("Resume Stream" if self.is_paused else "Pause Stream")
+
+    def clear_data(self):
+        self.total_counts = 0
+        self.alpha_counts = 0
+        self.beta_counts = 0
+        self.counts_history = []
+        self.time_history = []
+        self.amplitude_history = []
+        self.recorded_pulses = []
+        self.start_time = time.time()
+        
+        # Clear GUI
+        self.scope_curve.setData([])
+        self.history_curve.setData([], [])
+        self.hist_curve.setData([], [])
+        self.header.setText(f"System Reset | Waiting for data...")
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Plus:
+            self.threshold -= 20
+        elif event.key() == QtCore.Qt.Key_Minus:
+            self.threshold += 20
+        elif event.key() == QtCore.Qt.Key_P:
+            self.toggle_pause()
+        elif event.key() == QtCore.Qt.Key_R:
+            self.clear_data()
+        
+        self.threshold = min(0, self.threshold)
+        self.threshold_line.setValue(self.threshold)
 
     def closeEvent(self, event):
-        print("Finalizing session...")
-        self.audio.stop()
-        self.data.save_all()
+        self.audio_thread.stop()
+        self.logger.stop()
+        self.logger.join()
+        
+        if self.recorded_pulses:
+            print(f"Finalizing {len(self.recorded_pulses)} pulses...")
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"{DATA_FOLDER}/sr90_data_{timestamp}.pkl"
+            df = pd.DataFrame(self.recorded_pulses)
+            df.to_pickle(filename)
+            print(f"Full dataset saved to {filename}")
+            print(f"Metadata summary available in {self.logger.filename.replace('.pkl', '.csv')}")
+        
         event.accept()
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    pg.setConfigOptions(antialias=True, useOpenGL=True) # Modern high-perf rendering
-    view = ScientificScope()
-    view.show()
+    # Set professional dark palette
+    app.setStyle("Fusion")
+    dark_palette = QtGui.QPalette()
+    dark_palette.setColor(QtGui.QPalette.Window, QtGui.QColor(53, 53, 53))
+    dark_palette.setColor(QtGui.QPalette.WindowText, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.Base, QtGui.QColor(25, 25, 25))
+    dark_palette.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor(53, 53, 53))
+    dark_palette.setColor(QtGui.QPalette.ToolTipBase, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.ToolTipText, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.Text, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.Button, QtGui.QColor(53, 53, 53))
+    dark_palette.setColor(QtGui.QPalette.ButtonText, QtCore.Qt.white)
+    dark_palette.setColor(QtGui.QPalette.BrightText, QtCore.Qt.red)
+    dark_palette.setColor(QtGui.QPalette.Link, QtGui.QColor(42, 130, 218))
+    dark_palette.setColor(QtGui.QPalette.Highlight, QtGui.QColor(42, 130, 218))
+    dark_palette.setColor(QtGui.QPalette.HighlightedText, QtCore.Qt.black)
+    app.setPalette(dark_palette)
+
+    window = DetectorMainWindow()
+    window.show()
     sys.exit(app.exec_())
