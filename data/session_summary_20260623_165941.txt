@@ -1,0 +1,9 @@
+=== SR-90 PARTICLE DETECTOR SESSION SUMMARY ===
+Timestamp: 2026-06-23T16:59:41.416107
+Duration: 351.7 seconds
+Total Counts: 2735
+Beta Counts: 2734
+Alpha Counts: 1
+Average CPS: 7.78
+Calibration Factor: 0.057 keV/bit
+===============================================

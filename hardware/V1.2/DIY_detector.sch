@@ -35,7 +35,7 @@ L Device:CP C8
 U 1 1 4FA698C7
 P 6850 2900
 F 0 "C8" H 6900 3000 50  0000 L CNN
-F 1 "47u" H 6900 2800 50  0000 L CNN
+F 1 "10u" H 6900 2800 50  0000 L CNN
 F 2 "Capacitors_THT:CP_Radial_D6.3mm_P2.50mm" H 6850 2900 50  0001 C CNN
 F 3 "" H 6850 2900 50  0001 C CNN
 F 4 "Panasonic" H -1200 -1500 50  0001 C CNN "MFG"
@@ -95,7 +95,7 @@ L Device:C C4
 U 1 1 4FA69707
 P 4200 1650
 F 0 "C4" V 4300 1700 50  0000 L CNN
-F 1 "470n" V 4300 1400 50  0000 L CNN
+F 1 "100n" V 4300 1400 50  0000 L CNN
 F 2 "Capacitors_THT:C_Disc_D3.0mm_W1.6mm_P2.50mm" H 4200 1650 50  0001 C CNN
 F 3 "" H 4200 1650 50  0001 C CNN
 F 4 "Kemet" H -1200 -1550 50  0001 C CNN "MFG"
@@ -129,7 +129,7 @@ L Device:R R4
 U 1 1 4FA696EE
 P 4750 1650
 F 0 "R4" V 4850 1650 50  0000 C CNN
-F 1 "4k7" V 4750 1650 50  0000 C CNN
+F 1 "1k" V 4750 1650 50  0000 C CNN
 F 2 "Resistors_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" H 4750 1650 50  0001 C CNN
 F 3 "" H 4750 1650 50  0001 C CNN
 F 4 "Multicomp" H -1200 -1550 50  0001 C CNN "MFG"
@@ -176,7 +176,7 @@ L Device:C C2
 U 1 1 4FA6951A
 P 3550 1450
 F 0 "C2" V 3700 1450 50  0000 L CNN
-F 1 "10p" V 3650 1250 50  0000 L CNN
+F 1 "DNP" V 3650 1250 50  0000 L CNN
 F 2 "Capacitors_THT:C_Disc_D3.0mm_W1.6mm_P2.50mm" H 3550 1450 50  0001 C CNN
 F 3 "" H 3550 1450 50  0001 C CNN
 F 4 "Multicomp" H 3550 1450 50  0001 C CNN "MFG"
@@ -221,7 +221,7 @@ L Device:R R3
 U 1 1 4FA694AE
 P 3400 1650
 F 0 "R3" V 3480 1650 50  0000 C CNN
-F 1 "40M" V 3400 1650 50  0000 C CNN
+F 1 "22M" V 3400 1650 50  0000 C CNN
 F 2 "Resistors_THT:R_Axial_DIN0204_L3.6mm_D1.6mm_P2.54mm_Vertical" H 3400 1650 50  0001 C CNN
 F 3 "" H 3400 1650 50  0001 C CNN
 F 4 "TE Connectivity" H 3400 1650 50  0001 C CNN "MFG"
@@ -546,7 +546,7 @@ L Device:C C1
 U 1 1 5AFA5A4D
 P 3200 1450
 F 0 "C1" V 3350 1450 50  0000 L CNN
-F 1 "10p" V 3300 1250 50  0000 L CNN
+F 1 "1p" V 3300 1250 50  0000 L CNN
 F 2 "Capacitors_THT:C_Disc_D3.0mm_W1.6mm_P2.50mm" H 3200 1450 50  0001 C CNN
 F 3 "" H 3200 1450 50  0001 C CNN
 F 4 "Multicomp" H 3200 1450 50  0001 C CNN "MFG"
@@ -561,7 +561,7 @@ L Device:C C6
 U 1 1 5AFA6D34
 P 5500 1450
 F 0 "C6" V 5600 1500 50  0000 L CNN
-F 1 "3n3" V 5600 1250 50  0000 L CNN
+F 1 "100p" V 5600 1250 50  0000 L CNN
 F 2 "Capacitors_THT:C_Disc_D3.0mm_W1.6mm_P2.50mm" H 5500 1450 50  0001 C CNN
 F 3 "" H 5500 1450 50  0001 C CNN
 F 4 "Suntan" H 5500 1450 50  0001 C CNN "MFG"
@@ -1136,4 +1136,54 @@ Text Notes 7050 6350 0    79   ~ 0
 All hardware & software source files plus detailed instructions on:\nwww.github.com/ozel/DIY_particle_detector\nDetails on the physics of the sensors & reference measurements:\nwww.mdpi.com/1424-8220/19/19/4264 \n(www.doi.org/10.3390/s19194264)
 Wire Wire Line
 	8150 1900 8350 1900
+$Comp
+L Comparator:TLV3201 U2
+U 1 1 5F5E1234
+P 8500 3500
+F 0 "U2" H 8500 3200 60  0000 C CNN
+F 1 "TLV3201" H 8500 3800 60  0000 C CNN
+F 2 "Housings_SSOT:SOT-23-5" H 8500 3500 50  0001 C CNN
+F 3 "" H 8500 3500 50  0001 C CNN
+F 4 "TI" H 8500 3500 50  0001 C CNN "MFG"
+F 5 "TLV3201AIDCKT" H 8500 3500 50  0001 C CNN "MFG_PN"
+F 7 "High-Speed Comparator" H 8500 3500 50  0001 C CNN "Description"
+	1    8500 3500
+	1    0    0    -1  
+$EndComp
+$Comp
+L Device:R_POT RV1
+U 1 1 5F5E5678
+P 8000 3500
+F 0 "RV1" H 8000 3300 50  0000 C CNN
+F 1 "10k" H 8000 3700 50  0000 C CNN
+F 2 "Potentiometers:Potentiometer_Trimmer_Bourns_3296W_Vertical" H 8000 3500 50  0001 C CNN
+F 3 "" H 8000 3500 50  0001 C CNN
+F 7 "Vref Trimmer" H 8000 3500 50  0001 C CNN "Description"
+	1    8000 3500
+	1    0    0    -1  
+$EndComp
+$Comp
+L Device:R R_bias
+U 1 1 5F5E9ABC
+P 1200 2250
+F 0 "R_bias" V 1280 2250 50  0000 C CNN
+F 1 "100k" V 1200 2250 50  0000 C CNN
+F 2 "Resistors_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" H 1200 2250 50  0001 C CNN
+F 3 "" H 1200 2250 50  0001 C CNN
+F 7 "Bias Filter R" H 1200 2250 50  0001 C CNN "Description"
+	1    1200 2250
+	1    0    0    -1  
+$EndComp
+$Comp
+L Device:C C_bias
+U 1 1 5F5EDEF0
+P 1200 2450
+F 0 "C_bias" V 1300 2450 50  0000 L CNN
+F 1 "1u" V 1300 2250 50  0000 L CNN
+F 2 "Capacitors_THT:C_Disc_D3.0mm_W1.6mm_P2.50mm" H 1200 2450 50  0001 C CNN
+F 3 "" H 1200 2450 50  0001 C CNN
+F 7 "Bias Filter C" H 1200 2450 50  0001 C CNN "Description"
+	1    1200 2450
+	1    0    0    -1  
+$EndComp
 $EndSCHEMATC
